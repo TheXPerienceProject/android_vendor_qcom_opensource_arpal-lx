@@ -2,4 +2,5 @@ cc_library_headers {
     name: "liblisten_headers",
     vendor: true,
     export_include_dirs: ["."],
+    visibility: ["//visibility:public"],
 }
