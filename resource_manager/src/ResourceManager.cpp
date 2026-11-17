@@ -521,6 +521,9 @@ int ResourceManager::wake_unlock_fd = -1;
 uint32_t ResourceManager::wake_lock_cnt = 0;
 static int max_session_num;
 bool ResourceManager::isSpeakerProtectionEnabled = false;
+bool ResourceManager::isOplusSpeakerProtectionEnabled = false;
+bool ResourceManager::isOplusSpeakerAutoCalEnabled = false;
+bool ResourceManager::isLowBatterySpeakerProfileEnabled = false;
 bool ResourceManager::isHandsetProtectionEnabled = false;
 bool ResourceManager::isHapticsProtectionEnabled = false;
 bool ResourceManager::isChargeConcurrencyEnabled = false;
@@ -547,6 +550,7 @@ bool ResourceManager::isDummyDevEnabled = false;
 bool ResourceManager::isProxyRecordActive = false;
 int ResourceManager::max_voice_vol = -1;     /* Variable to store max volume index for voice call */
 bool ResourceManager::isLvacfsEnabled = false;
+bool ResourceManager::isOprecAudrecEnabled = false;
 bool ResourceManager::isSignalHandlerEnabled = false;
 static int haptics_priority;
 bool ResourceManager::isHapticsthroughWSA = false;
@@ -3930,11 +3934,11 @@ int ResourceManager::increaseStreamUserCounter(Stream* s)
         it->second.second) {
         if (0 == it->second.first) {
             s->waitStreamSmph();
-            PAL_DBG(LOG_TAG, "stream %p in use", s);
+            PAL_VERBOSE(LOG_TAG, "stream %p in use", s);
         }
-        PAL_DBG(LOG_TAG, "stream %p counter was %d", s, it->second.first);
+        PAL_VERBOSE(LOG_TAG, "stream %p counter was %d", s, it->second.first);
         it->second.first = it->second.first + 1;
-        PAL_DBG(LOG_TAG, "stream %p counter increased to %d", s, it->second.first);
+        PAL_VERBOSE(LOG_TAG, "stream %p counter increased to %d", s, it->second.first);
         return 0;
     } else {
         PAL_ERR(LOG_TAG, "stream %p is not found or inactive.", s);
@@ -3948,7 +3952,7 @@ int ResourceManager::decreaseStreamUserCounter(Stream* s)
     printStreamUserCounter(s);
     it = mActiveStreamUserCounter.find(s);
     if (it != mActiveStreamUserCounter.end()) {
-        PAL_DBG(LOG_TAG, "stream %p counter was %d", s, it->second.first);
+        PAL_VERBOSE(LOG_TAG, "stream %p counter was %d", s, it->second.first);
         if (0 == it->second.first) {
             PAL_ERR(LOG_TAG, "counter of stream %p has already been 0.", s);
             return -EINVAL;
@@ -3956,10 +3960,10 @@ int ResourceManager::decreaseStreamUserCounter(Stream* s)
 
         it->second.first = it->second.first - 1;
         if (0 == it->second.first) {
-            PAL_DBG(LOG_TAG, "stream %p not in use", s);
+            PAL_VERBOSE(LOG_TAG, "stream %p not in use", s);
             s->postStreamSmph();
         }
-        PAL_DBG(LOG_TAG, "stream %p counter decreased to %d", s, it->second.first);
+        PAL_VERBOSE(LOG_TAG, "stream %p counter decreased to %d", s, it->second.first);
         return 0;
     } else {
         PAL_ERR(LOG_TAG, "stream %p is not found.", s);
@@ -8271,6 +8275,8 @@ bool ResourceManager::updateDeviceConfig(std::shared_ptr<Device> *inDev,
     std::vector <Stream *> streamsToSwitch;
     std::vector <Stream*>::iterator sIter;
     struct pal_device streamDevAttr;
+    struct pal_stream_attributes sAttr;
+    std::vector<std::shared_ptr<Device>> devices;
 
     PAL_DBG(LOG_TAG, "Enter");
 
@@ -8338,6 +8344,45 @@ bool ResourceManager::updateDeviceConfig(std::shared_ptr<Device> *inDev,
             for (sIter = streamsToSwitch.begin(); sIter != streamsToSwitch.end(); sIter++) {
                 streamDevDisconnect.push_back({(*sIter), streamDevAttr.id});
                 streamDevConnect.push_back({(*sIter), &streamDevAttr});
+            }
+        }
+    }
+    /*
+     * Switching any existing playback streams active on previous device
+     * when new device is selected for call, as both of them have dangling link
+     * to TX device, and vise versa, i.e. switching active streams on previous device
+     * to new voice device if voice call is starting on a different device.
+     */
+    if (inStrAttr->type == PAL_STREAM_VOICE_CALL) {
+        for (auto& str: mActiveStreams) {
+            if (!isStreamActive(str, mActiveStreams))
+                continue;
+            status = str->getStreamAttributes(&sAttr);
+            if (status != 0) {
+                PAL_ERR(LOG_TAG,"stream get attributes failed");
+                continue;
+            }
+            if (sAttr.direction == PAL_AUDIO_OUTPUT &&
+                (sAttr.type == PAL_STREAM_LOW_LATENCY ||
+                sAttr.type == PAL_STREAM_DEEP_BUFFER ||
+                sAttr.type == PAL_STREAM_PCM_OFFLOAD ||
+                sAttr.type == PAL_STREAM_COMPRESSED ||
+                sAttr.type == PAL_STREAM_GENERIC ||
+                sAttr.type == PAL_STREAM_VOIP_RX ||
+                sAttr.type == PAL_STREAM_ULTRA_LOW_LATENCY)) {
+                devices.clear();
+                str->getAssociatedDevices(devices);
+                if (devices.size() > 0) {
+                    for (auto device: devices) {
+                        if ((isInputDevId(device->getSndDeviceId()) && isInputDevId(inDevAttr->id)) ||
+                            (isOutputDevId(device->getSndDeviceId()) && isOutputDevId(inDevAttr->id))) {
+                            if (device->getSndDeviceId() != inDevAttr->id) {
+                                streamDevDisconnect.push_back({str, device->getSndDeviceId()});
+                                streamDevConnect.push_back({str, inDevAttr});
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -8781,6 +8826,8 @@ int ResourceManager::setConfigParams(struct str_parms *parms)
     ret = setUpdCustomGainParam(parms, value, len);
     ret = setDualMonoEnableParam(parms, value, len);
     ret = setLvacfsEnableParam(parms, value, len);
+    ret = setOprecAudrecEnableParam(parms, value, len);
+    ret = setOplusSpeakerProtectionParam(parms, value, len);
     ret = setSignalHandlerEnableParam(parms, value, len);
     ret = setMuxconfigEnableParam(parms, value, len);
     ret = setUpdDutyCycleEnableParam(parms, value, len);
@@ -9106,6 +9153,70 @@ int ResourceManager::setLvacfsEnableParam(struct str_parms *parms,
     }
 
     PAL_INFO(LOG_TAG, "LVACFS enabled is=%x", isLvacfsEnabled);
+
+    return ret;
+}
+
+int ResourceManager::setOprecAudrecEnableParam(struct str_parms *parms,
+                                 char *value, int len)
+{
+    int ret = -EINVAL;
+
+    if (!value || !parms)
+        return ret;
+
+    ret = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_RECORD_USE_AP_OPREC_AUDREC,
+                                value, len);
+    PAL_INFO(LOG_TAG," value %s", value);
+    if (ret >= 0) {
+        if (value && (!strncmp(value, "enable", sizeof("enable") - 1) ||
+                      !strncmp(value, "true", sizeof("true") - 1)))
+            isOprecAudrecEnabled = true;
+
+        str_parms_del(parms, AUDIO_PARAMETER_KEY_RECORD_USE_AP_OPREC_AUDREC);
+    }
+
+    PAL_INFO(LOG_TAG, "OPREC audrec enabled is=%x", isOprecAudrecEnabled);
+
+    return ret;
+}
+
+
+int ResourceManager::setOplusSpeakerProtectionParam(struct str_parms *parms,
+                                                    char *value, int len)
+{
+    int ret = -EINVAL;
+
+    if (!value || !parms)
+        return ret;
+
+    ret = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_OPLUS_CHECK_SPEAKER,
+                            value, len);
+    if (ret >= 0) {
+        isOplusSpeakerProtectionEnabled =
+            !strncmp(value, "true", sizeof("true") - 1);
+        str_parms_del(parms, AUDIO_PARAMETER_KEY_OPLUS_CHECK_SPEAKER);
+    }
+
+    ret = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_SPEAKER_AUTO_CALIBRATION,
+                            value, len);
+    if (ret >= 0) {
+        isOplusSpeakerAutoCalEnabled =
+            !strncmp(value, "true", sizeof("true") - 1);
+        str_parms_del(parms, AUDIO_PARAMETER_KEY_SPEAKER_AUTO_CALIBRATION);
+    }
+
+    ret = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_LOWBATTERY_SPEAKER_PROFILE,
+                            value, len);
+    if (ret >= 0) {
+        isLowBatterySpeakerProfileEnabled =
+            !strncmp(value, "true", sizeof("true") - 1);
+        str_parms_del(parms, AUDIO_PARAMETER_KEY_LOWBATTERY_SPEAKER_PROFILE);
+    }
+
+    PAL_INFO(LOG_TAG, "Oplus speaker protection enabled=%d auto_cal=%d lowbat=%d",
+             isOplusSpeakerProtectionEnabled, isOplusSpeakerAutoCalEnabled,
+             isLowBatterySpeakerProfileEnabled);
 
     return ret;
 }
@@ -10699,6 +10810,14 @@ int ResourceManager::getParameter(uint32_t param_id, void **param_payload,
 
             *payload_size = sizeof(isLvacfsEnabled);
             **(bool **)param_payload = isLvacfsEnabled;
+        }
+        break;
+        case PAL_PARAM_ID_OPREC_AUDREC:
+        {
+            PAL_INFO(LOG_TAG, "get parameter for OPREC audrec");
+
+            *payload_size = sizeof(isOprecAudrecEnabled);
+            **(bool **)param_payload = isOprecAudrecEnabled;
         }
         break;
         default:

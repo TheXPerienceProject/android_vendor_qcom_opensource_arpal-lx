@@ -28,7 +28,7 @@
  *
  * Changes from Qualcomm Innovation Center are provided under the following license:
  *
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023, 2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -65,8 +65,10 @@
 #define DEVICE_H
 #include <iostream>
 #include <map>
-#include <mutex>
 #include <memory>
+#include <mutex>
+#include <utility>
+#include <vector>
 #include "PalApi.h"
 #include "PalDefs.h"
 #include <string.h>
@@ -121,7 +123,7 @@ public:
     static std::shared_ptr<Device> getInstance(struct pal_device *device,
                                                std::shared_ptr<ResourceManager> Rm);
     int getSndDeviceId();
-    int getDeviceCount() { return deviceCount; }
+    int getDeviceCount();
     std::string getPALDeviceName();
     int setDeviceAttributes(struct pal_device &dattr);
     virtual int getDeviceAttributes(struct pal_device *dattr,
@@ -136,6 +138,14 @@ public:
     virtual int32_t setParameter(uint32_t param_id, void *param);
     virtual int32_t getDeviceParameter(uint32_t param_id, void **param);
     virtual int32_t getParameter(uint32_t param_id, void **param);
+#ifdef OPLUS_SPEAKER_PROTECTION
+    /*
+     * Appends the speaker protection scene CKV ({0xEF000000, scene}) used by
+     * the OPLUS speaker protection backend.
+     */
+    virtual int populateSpeakerCKV(Stream *s,
+                                   std::vector<std::pair<int, int>> &ckv);
+#endif
     virtual bool isDeviceReady() { return true;}
     void setSndName (std::string snd_name) { UpdatedSndName = snd_name;}
     void clearSndName () { UpdatedSndName.clear();}
